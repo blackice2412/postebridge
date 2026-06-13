@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import readline from "readline/promises";
 import { stdin as input, stdout as output } from "process";
-import { changePassword, USERNAME } from "../lib/auth.js";
+import { changePassword, getProfile } from "../lib/auth.js";
 
 const rl = readline.createInterface({ input, output });
 
@@ -41,7 +41,8 @@ function readHidden(prompt) {
 }
 
 async function main() {
-  output.write(`PosteBridge password change (user: ${USERNAME})\n`);
+  const profile = await getProfile();
+  output.write(`PosteBridge password change (user: ${profile.username})\n`);
 
   const password = await readHidden("New password: ");
   const confirm = await readHidden("Confirm password: ");

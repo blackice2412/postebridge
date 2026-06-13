@@ -1,15 +1,25 @@
-import "dotenv/config";
 import express from "express";
 import session from "express-session";
+import sessionFileStore from "session-file-store";
 import path from "path";
 import { fileURLToPath } from "url";
 import {
   ensureAuth,
+  getDataDir,
   getSessionSecret,
+  getProfile,
+  updateProfile,
   verifyLogin,
   generatePassword,
-  USERNAME,
 } from "./lib/auth.js";
+import {
+  getPublicSettings,
+  getSettings,
+  loadSettings,
+  updateSettings,
+} from "./lib/settings.js";
+import { createHostingerClient } from "./lib/hostinger.js";
+import { resolveProvider } from "./lib/providers.js";
 import { runDnsCheck, SUPPORTED_TYPES } from "./lib/dns-checker.js";
 import {
   isPosteConfigured,
@@ -27,6 +37,7 @@ import {
   resolveMailHost,
   ensurePosteDkim,
   getPosteDomainQuota,
+  setPosteConfigProvider,
 } from "./lib/poste.js";
 import { analyzeDnsGaps } from "./lib/dns-gap.js";
 import { formatTxt, parseTxtContent } from "./lib/txt-dns.js";
@@ -35,23 +46,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3847;
 const API_BASE = "https://api.hetzner.cloud/v1";
+const FRONTEND_PATH = path.join(__dirname, "dist");
+const FileStore = sessionFileStore(session);
+const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 
-const apiKey = process.env.HETZNER_API_KEY;
-if (!apiKey) {
-  console.error("HETZNER_API_KEY is required in .env");
-  process.exit(1);
-}
-
-const PUBLIC_PATHS = new Set([
-  "/login",
-  "/login.html",
-  "/login.js",
-  "/styles.css",
-]);
+const PUBLIC_PATHS = new Set(["/login"]);
 
 app.use(express.json());
 
 await ensureAuth();
+await loadSettings();
+setPosteConfigProvider(() => getSettings().poste);
 const sessionSecret = await getSessionSecret();
 
 // Behind Dokploy/nginx TLS termination the app sees HTTP unless proxy is trusted.
@@ -65,19 +70,24 @@ app.use(
   session({
     name: "postebridge.sid",
     secret: sessionSecret,
+    store: new FileStore({
+      path: path.join(getDataDir(), "sessions"),
+      ttl: SESSION_MAX_AGE / 1000,
+      retries: 1,
+    }),
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
       sameSite: "lax",
       secure: cookieSecure,
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      maxAge: SESSION_MAX_AGE,
     },
   })
 );
 
 function isAuthenticated(req) {
-  return req.session?.user === USERNAME;
+  return req.session?.authenticated === true;
 }
 
 function requireAuth(req, res, next) {
@@ -104,12 +114,14 @@ app.post("/api/auth/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
-    req.session.user = USERNAME;
+    const profile = await getProfile();
+    req.session.authenticated = true;
+    req.session.username = profile.username;
     req.session.save((err) => {
       if (err) {
         return res.status(500).json({ error: "Could not create session" });
       }
-      res.json({ ok: true, username: USERNAME });
+      res.json({ ok: true, username: profile.username });
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -122,19 +134,49 @@ app.post("/api/auth/logout", (req, res) => {
   });
 });
 
-app.get("/api/auth/me", (req, res) => {
+app.get("/api/auth/me", async (req, res) => {
   if (!isAuthenticated(req)) {
-    return res.status(401).json({ error: "Unauthorized" });
+    return res.json({ authenticated: false });
   }
-  res.json({ username: USERNAME });
+  res.json({ authenticated: true, ...(await getProfile()) });
 });
 
+app.use(express.static(FRONTEND_PATH, { index: false }));
+
 app.get("/login", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "login.html"));
+  res.sendFile(path.join(FRONTEND_PATH, "index.html"));
 });
 
 app.use(requireAuth);
-app.use(express.static(path.join(__dirname, "public")));
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(FRONTEND_PATH, "index.html"));
+});
+
+app.get("/api/settings", (_req, res) => {
+  res.json(getPublicSettings());
+});
+
+app.put("/api/settings", async (req, res) => {
+  try {
+    res.json(await updateSettings(req.body));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.get("/api/profile", async (_req, res) => {
+  res.json(await getProfile());
+});
+
+app.patch("/api/profile", async (req, res) => {
+  try {
+    const profile = await updateProfile(req.body);
+    req.session.username = profile.username;
+    res.json(profile);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
 
 app.post("/api/dns-check", async (req, res) => {
   try {
@@ -151,6 +193,12 @@ app.get("/api/dns-check/types", (_req, res) => {
 });
 
 async function hetzner(pathname, options = {}) {
+  const apiKey = getSettings().providers.hetzner.apiKey;
+  if (!apiKey) {
+    const err = new Error("Configure the Hetzner API key in Settings");
+    err.status = 503;
+    throw err;
+  }
   const url = `${API_BASE}${pathname}`;
   const res = await fetch(url, {
     ...options,
@@ -181,6 +229,29 @@ async function hetzner(pathname, options = {}) {
   }
 
   return data;
+}
+
+function providerName(req) {
+  const requested = req.query.provider || req.body?.provider;
+  return resolveProvider(requested, getSettings().activeProvider);
+}
+
+function hostingerClient() {
+  return createHostingerClient(getSettings().providers.hostinger.apiToken);
+}
+
+async function listZones(provider) {
+  if (provider === "hostinger") {
+    return hostingerClient().listZones();
+  }
+  return fetchAllPages("/zones", "zones");
+}
+
+async function listRrsets(provider, zoneId) {
+  if (provider === "hostinger") {
+    return hostingerClient().listRrsets(zoneId);
+  }
+  return fetchAllPages(`/zones/${zoneId}/rrsets`, "rrsets");
 }
 
 async function fetchAllPages(pathname, key) {
@@ -288,7 +359,40 @@ async function setRrsetRecords(zoneId, name, type, ttl, records) {
 }
 
 async function upsertRrset(zoneId, { name, type, ttl, records }, options = {}) {
-  const { zoneName: zoneNameInput, mergeTxt = false, replaceDmarc = false } = options;
+  const {
+    zoneName: zoneNameInput,
+    mergeTxt = false,
+    replaceDmarc = false,
+    provider = getSettings().activeProvider,
+  } = options;
+
+  if (provider === "hostinger") {
+    let finalRecords = records;
+    if (mergeTxt && type === "TXT") {
+      const rrsets = await listRrsets(provider, zoneId);
+      const existing = rrsets.find(
+        (rrset) =>
+          rrset.type === type &&
+          rrsetNamesEquivalent(rrset.name, name, zoneNameInput || zoneId)
+      );
+      if (existing?.records?.length) {
+        finalRecords = mergeTxtRecords(existing.records, records, {
+          replaceSpf: true,
+          replaceDmarc,
+        });
+        if (recordsEquivalent(type, existing.records, finalRecords)) {
+          return { unchanged: true };
+        }
+      }
+    }
+    return hostingerClient().upsertRrset(zoneId, {
+      name,
+      type,
+      ttl,
+      records: finalRecords,
+    });
+  }
+
   const zoneName = await resolveZoneName(zoneId, zoneNameInput);
   const existing = await findRrset(zoneId, name, type, zoneName);
   const apiName = existing?.name ?? name;
@@ -350,8 +454,9 @@ function assertRrsetMutable(type) {
 
 app.get("/api/zones", async (_req, res) => {
   try {
-    const zones = await fetchAllPages("/zones", "zones");
-    res.json({ zones });
+    const provider = providerName(_req);
+    const zones = await listZones(provider);
+    res.json({ zones, provider });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
@@ -359,6 +464,11 @@ app.get("/api/zones", async (_req, res) => {
 
 app.post("/api/zones", async (req, res) => {
   try {
+    if (providerName(req) === "hostinger") {
+      return res.status(405).json({
+        error: "Hostinger creates DNS zones from domains in your account",
+      });
+    }
     const { name, ttl = 3600 } = req.body;
     if (!name) return res.status(400).json({ error: "Zone name is required" });
 
@@ -374,10 +484,7 @@ app.post("/api/zones", async (req, res) => {
 
 app.get("/api/zones/:zoneId/rrsets", async (req, res) => {
   try {
-    const rrsets = await fetchAllPages(
-      `/zones/${req.params.zoneId}/rrsets`,
-      "rrsets"
-    );
+    const rrsets = await listRrsets(providerName(req), req.params.zoneId);
     res.json({ rrsets });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -392,10 +499,18 @@ app.post("/api/zones/:zoneId/rrsets", async (req, res) => {
     }
     assertRrsetMutable(type);
 
-    const data = await hetzner(`/zones/${req.params.zoneId}/rrsets`, {
-      method: "POST",
-      body: JSON.stringify({ name, type, ttl, records }),
-    });
+    const provider = providerName(req);
+    const data =
+      provider === "hostinger"
+        ? await upsertRrset(
+            req.params.zoneId,
+            { name, type, ttl, records },
+            { provider, zoneName: req.params.zoneId }
+          )
+        : await hetzner(`/zones/${req.params.zoneId}/rrsets`, {
+            method: "POST",
+            body: JSON.stringify({ name, type, ttl, records }),
+          });
     res.json(data);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -411,7 +526,11 @@ app.put("/api/zones/:zoneId/rrsets/:name/:type", async (req, res) => {
       return res.status(400).json({ error: "records are required" });
     }
 
-    const data = await upsertRrset(zoneId, { name, type, ttl, records });
+    const data = await upsertRrset(
+      zoneId,
+      { name, type, ttl, records },
+      { provider: providerName(req), zoneName: zoneId }
+    );
     res.json(data);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -422,11 +541,14 @@ app.delete("/api/zones/:zoneId/rrsets/:name/:type", async (req, res) => {
   try {
     const { zoneId, name, type } = req.params;
     assertRrsetMutable(type);
-    const encodedName = encodeRrsetName(name);
-    const data = await hetzner(
-      `/zones/${zoneId}/rrsets/${encodedName}/${type}`,
-      { method: "DELETE" }
-    );
+    const provider = providerName(req);
+    const data =
+      provider === "hostinger"
+        ? await hostingerClient().deleteRrset(zoneId, name, type)
+        : await hetzner(
+            `/zones/${zoneId}/rrsets/${encodeRrsetName(name)}/${type}`,
+            { method: "DELETE" }
+          );
     res.json(data);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -435,6 +557,11 @@ app.delete("/api/zones/:zoneId/rrsets/:name/:type", async (req, res) => {
 
 app.delete("/api/zones/:zoneId", async (req, res) => {
   try {
+    if (providerName(req) === "hostinger") {
+      return res.status(405).json({
+        error: "Delete Hostinger domains from hPanel, not from DNS management",
+      });
+    }
     const data = await hetzner(`/zones/${req.params.zoneId}`, { method: "DELETE" });
     res.json(data);
   } catch (err) {
@@ -444,6 +571,9 @@ app.delete("/api/zones/:zoneId", async (req, res) => {
 
 app.get("/api/servers", async (_req, res) => {
   try {
+    if (providerName(_req) !== "hetzner") {
+      return res.json({ servers: [], provider: providerName(_req) });
+    }
     const servers = await fetchAllPages("/servers", "servers");
     res.json({
       servers: servers.map((s) => ({
@@ -462,6 +592,11 @@ app.get("/api/servers", async (_req, res) => {
 
 app.post("/api/servers/:serverId/rdns", async (req, res) => {
   try {
+    if (providerName(req) !== "hetzner") {
+      return res.status(405).json({
+        error: "Reverse DNS management is currently available for Hetzner only",
+      });
+    }
     const { ip, dns_ptr } = req.body;
     if (!ip || !dns_ptr) {
       return res.status(400).json({ error: "ip and dns_ptr are required" });
@@ -531,6 +666,7 @@ app.post("/api/zones/:zoneId/mail-setup", async (req, res) => {
       },
     ];
 
+    const provider = providerName(req);
     const results = [];
     for (const rrset of records) {
       try {
@@ -538,6 +674,7 @@ app.post("/api/zones/:zoneId/mail-setup", async (req, res) => {
           zoneName: domain,
           mergeTxt: rrset.type === "TXT",
           replaceDmarc: rrset.name === "_dmarc",
+          provider,
         });
         results.push({
           name: rrset.name,
@@ -565,13 +702,13 @@ app.post("/api/zones/:zoneId/mail-setup", async (req, res) => {
 function requirePoste(_req, res, next) {
   if (!isPosteConfigured()) {
     return res.status(503).json({
-      error: "POSTE_BASE_URL, POSTE_ADMIN_EMAIL, and POSTE_ADMIN_PASSWORD are required",
+      error: "Configure the Poste.io connection in Settings",
     });
   }
   next();
 }
 
-async function applyRrsetsToZone(zoneId, domain, rrsets) {
+async function applyRrsetsToZone(zoneId, domain, rrsets, provider) {
   const results = [];
   for (const rrset of rrsets) {
     try {
@@ -579,6 +716,7 @@ async function applyRrsetsToZone(zoneId, domain, rrsets) {
         zoneName: domain,
         mergeTxt: Boolean(rrset.mergeTxt),
         replaceDmarc: Boolean(rrset.replaceDmarc),
+        provider,
       });
       results.push({
         name: rrset.name,
@@ -629,11 +767,12 @@ app.get("/api/poste/domains", requirePoste, async (_req, res) => {
 
 app.get("/api/poste/overview", requirePoste, async (_req, res) => {
   try {
-    const [posteDomains, hetznerZones] = await Promise.all([
+    const provider = providerName(_req);
+    const [posteDomains, dnsZones] = await Promise.all([
       listPosteDomains(),
-      fetchAllPages("/zones", "zones"),
+      listZones(provider),
     ]);
-    const zoneByName = new Map(hetznerZones.map((zone) => [zone.name, zone.id]));
+    const zoneByName = new Map(dnsZones.map((zone) => [zone.name, zone.id]));
     const posteNames = new Set(posteDomains.map((domain) => domain.name));
     const domains = await Promise.all(
       posteDomains.map(async (domain) => {
@@ -641,13 +780,13 @@ app.get("/api/poste/overview", requirePoste, async (_req, res) => {
         return {
           ...domain,
           mailboxCount: mailboxes.length,
-          hetznerZoneId: zoneByName.get(domain.name) || null,
+          zoneId: zoneByName.get(domain.name) || null,
         };
       })
     );
-    const unmanagedZones = hetznerZones
+    const unmanagedZones = dnsZones
       .filter((zone) => !posteNames.has(zone.name))
-      .map((zone) => ({ name: zone.name, hetznerZoneId: zone.id }));
+      .map((zone) => ({ name: zone.name, zoneId: zone.id }));
     const totalMailboxes = domains.reduce((sum, domain) => sum + domain.mailboxCount, 0);
 
     res.json({
@@ -656,9 +795,10 @@ app.get("/api/poste/overview", requirePoste, async (_req, res) => {
       totals: {
         posteDomains: domains.length,
         mailboxes: totalMailboxes,
-        unlinked: domains.filter((domain) => !domain.hetznerZoneId).length,
+        unlinked: domains.filter((domain) => !domain.zoneId).length,
         unmanagedZones: unmanagedZones.length,
       },
+      provider,
       ...getPosteUrls(),
     });
   } catch (err) {
@@ -686,7 +826,7 @@ app.get("/api/poste/domains/:name/health", requirePoste, async (req, res) => {
     let toApply = null;
     let dnsComplete = null;
     if (zoneId) {
-      const rrsets = await fetchAllPages(`/zones/${zoneId}/rrsets`, "rrsets");
+      const rrsets = await listRrsets(providerName(req), zoneId);
       const analysis = analyzeDnsGaps(domain, dns, rrsets, formatTxt);
       gaps = analysis.gaps;
       toApply = analysis.toApply;
@@ -733,7 +873,7 @@ app.get("/api/poste/domains/:name/dns", requirePoste, async (req, res) => {
     let gaps = null;
     let toApply = null;
     if (zoneId) {
-      const rrsets = await fetchAllPages(`/zones/${zoneId}/rrsets`, "rrsets");
+      const rrsets = await listRrsets(providerName(req), zoneId);
       const analysis = analyzeDnsGaps(domain, dns, rrsets, formatTxt);
       gaps = analysis.gaps;
       toApply = analysis.toApply;
@@ -765,9 +905,15 @@ app.post("/api/zones/:zoneId/poste-setup", requirePoste, async (req, res) => {
     if (!domain) return res.status(400).json({ error: "domain is required" });
 
     const dns = await fetchPosteDnsBundle(domain, { dmarcEmail });
-    const rrsets = await fetchAllPages(`/zones/${zoneId}/rrsets`, "rrsets");
+    const provider = providerName(req);
+    const rrsets = await listRrsets(provider, zoneId);
     const { gaps, toApply } = analyzeDnsGaps(domain, dns, rrsets, formatTxt);
-    const dnsResults = await applyRrsetsToZone(zoneId, domain, toApply);
+    const dnsResults = await applyRrsetsToZone(
+      zoneId,
+      domain,
+      toApply,
+      provider
+    );
 
     let registration = null;
     if (register) {

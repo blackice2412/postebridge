@@ -1,0 +1,17 @@
+name: postebridge-standalone
+
+services:
+  postebridge:
+    build:
+      context: .
+    image: postebridge:local
+    restart: unless-stopped
+    ports:
+      - "${POSTEBRIDGE_PORT:-3847}:3847"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - postebridge-data:/app/data
+
+volumes:
+  postebridge-data:

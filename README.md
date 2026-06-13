@@ -1,104 +1,143 @@
 # PosteBridge
 
-**Link Hetzner DNS to Poste.io** — one UI to keep your mail domains in sync.
+PosteBridge is a private Vue dashboard for DNS and Poste.io mail operations. It supports Hetzner Cloud DNS and Hostinger DNS, keeps provider credentials encrypted on disk, manages Poste domains and mailboxes, checks DNS propagation, and updates Hetzner reverse DNS.
 
-Running self-hosted mail on [Poste.io](https://poste.io) with DNS at [Hetzner Cloud](https://www.hetzner.com/cloud) means juggling two consoles: register the domain on Poste, copy MX/SPF/DKIM/DMARC into Hetzner, chunk long DKIM TXT records, create mailboxes, check what’s missing. PosteBridge connects both sides and shows only what still needs doing.
-
-## What it links
-
-| Hetzner DNS | ↔ | Poste.io |
-|-------------|---|----------|
-| Zones & record sets | | Registered domains |
-| MX, SPF, DKIM, DMARC, autoconfig | | DKIM keys & mail host |
-| Gap detection (skip what’s already correct) | | Domain registration & mailboxes |
-| PTR / reverse DNS (optional) | | Webmail & admin |
-
-**Email** view — work on one selected zone: DNS gaps, apply missing records (including auto-chunked DKIM), register on Poste.io, manage mailboxes, health check.
-
-**Mail Manager** — fleet view: all Poste domains, Hetzner zone linkage, search, and zones that exist in Hetzner but aren’t on Poste yet.
-
-Buttons disable when DNS is complete or the domain is already registered. **Full setup** applies pending DNS then registers the domain in one step.
-
-## Quick start
+## Start everything
 
 ```bash
-cp .env.example .env
-# HETZNER_API_KEY=...
-# POSTE_BASE_URL=http://posteio.your-server.com
-# POSTE_ADMIN_EMAIL=admin@yourdomain.com
-# POSTE_ADMIN_PASSWORD=...
+docker compose up -d --build
+docker compose logs postebridge
+```
 
+The first start prints a generated dashboard username and password once in the `postebridge` logs.
+
+Open:
+
+- PosteBridge: `http://localhost:3847`
+- Poste.io initial setup: `http://localhost:8080/admin`
+
+Complete Poste.io's initial admin setup, then open **PosteBridge → Settings** and enter:
+
+- A Hetzner API key and/or Hostinger API token
+- Poste URL `http://poste`
+- The Poste.io admin email and password created in the setup screen
+- An optional public mail hostname such as `mail.example.com`
+
+No `.env` file is used for credentials.
+
+## Use an existing Poste.io server
+
+If Poste.io is already installed separately on the same server, launch only
+PosteBridge:
+
+```bash
+docker compose -f compose.standalone.yaml up -d --build
+docker compose -f compose.standalone.yaml logs postebridge
+```
+
+If port `3847` is already in use:
+
+```bash
+POSTEBRIDGE_PORT=3857 \
+  docker compose -f compose.standalone.yaml up -d --build
+```
+
+Then open **Settings** and use the host-published Poste.io URL:
+
+```text
+http://host.docker.internal:8080
+```
+
+Replace `8080` with the port exposed by the existing Poste.io installation.
+`host.docker.internal` works on Docker Desktop and is mapped to the Docker host
+by the standalone Compose file on Linux.
+
+## Persistent data
+
+The bundled Compose stack creates two named volumes:
+
+| Volume | Contents |
+|---|---|
+| `postebridge-data` | Dashboard login, session secret, encrypted provider settings |
+| `poste-data` | Poste.io users, mail, DKIM keys, certificates, configuration, and logs |
+
+The standalone Compose file creates only `postebridge-data`. It does not mount,
+modify, restart, or otherwise manage the existing Poste.io installation.
+
+Redeploying or rebuilding the containers keeps both volumes:
+
+```bash
+docker compose up -d --build
+```
+
+For standalone mode:
+
+```bash
+docker compose -f compose.standalone.yaml up -d --build
+```
+
+Do not run `docker compose down -v` unless you intentionally want to delete credentials and mail data.
+
+## Mail ports
+
+The bundled Poste.io service publishes SMTP, POP3, IMAP, submission, and Sieve ports:
+
+`25`, `110`, `143`, `465`, `587`, `993`, `995`, and `4190`.
+
+Poste's HTTP setup UI is mapped to host port `8080`. The Compose default uses `HTTPS=OFF` so PosteBridge can call the Poste API over the private Docker network. Put the public web UI behind your TLS reverse proxy for production.
+
+An internet-facing mail server also needs:
+
+- A public static IP
+- Port forwarding and firewall rules for the required mail ports
+- PTR/reverse DNS matching the mail hostname
+- Correct MX, SPF, DKIM, and DMARC records
+
+PosteBridge can apply the DNS records and set Hetzner PTR records.
+
+## Provider behavior
+
+### Hetzner
+
+- List, create, and delete zones
+- Create, edit, and delete record sets
+- List cloud servers and update PTR records
+
+### Hostinger
+
+- List domains from the Hostinger account portfolio
+- Read, update, validate-compatible, and delete DNS records
+- Apply Poste.io DNS records
+
+Hostinger's API does not expose creation or deletion of an empty DNS zone. Add or remove domains through Hostinger hPanel; they then appear in PosteBridge.
+
+## Local development
+
+```bash
 npm install
+npm run build
 npm start
 ```
 
-Open http://localhost:3847 — first run prints `root` and a one-time password to the console.
-
-## Poste.io + Hetzner setup
-
-```env
-HETZNER_API_KEY=your-hetzner-cloud-api-token
-
-POSTE_BASE_URL=http://posteio.your-server.com
-POSTE_ADMIN_EMAIL=admin@yourdomain.com
-POSTE_ADMIN_PASSWORD=your-admin-password
-POSTE_MAIL_HOST=mail.yourdomain.com   # optional — defaults to mail.<domain>
-```
-
-Typical flow for a new domain:
-
-1. Create the zone in Hetzner (or pick an existing zone).
-2. Open **Email** → **Full setup** (or apply DNS, then register).
-3. Confirm gaps are green in the health check.
-4. Create mailboxes and open webmail.
-
-Poste API docs: `{POSTE_BASE_URL}/admin/api/doc`
-
-## Also included
-
-- Zone & record CRUD (A, AAAA, CNAME, MX, TXT, SRV, CAA) — NS/SOA protected
-- Global DNS propagation check (12 public resolvers)
-- Legacy one-click mail DNS without Poste.io (A + MX + SPF + DMARC)
-- Session login, SweetAlert2 UI, Docker-ready
-
-## Docker
+For frontend development, run the API and Vite in separate terminals:
 
 ```bash
-docker build -t postebridge .
-docker run -p 3847:3847 -v postebridge-data:/app/data --env-file .env postebridge
+npm run dev:server
+npm run dev
 ```
 
-Mount `/app/data` so login credentials survive redeploys. Behind HTTPS (e.g. Dokploy), set `COOKIE_SECURE=true` or login succeeds but the session won’t stick.
+Vite runs on `http://localhost:5173` and proxies API calls to port `3847`.
 
-## Environment variables
+## Profile
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `HETZNER_API_KEY` | Yes | — | Hetzner Cloud API token (DNS zones) |
-| `POSTE_BASE_URL` | For mail | — | Poste.io server URL |
-| `POSTE_ADMIN_EMAIL` | For mail | — | Poste.io admin email (API basic auth) |
-| `POSTE_ADMIN_PASSWORD` | For mail | — | Poste.io admin password |
-| `POSTE_MAIL_HOST` | No | `mail.<domain>` | Hostname in MX / autoconfig records |
-| `PORT` | No | `3847` | HTTP port |
-| `DATA_DIR` | No | `./data` | Auth credentials path |
-| `COOKIE_SECURE` | No | `false` | `true` when served over HTTPS |
-| `TRUST_PROXY` | No | enabled | `false` to ignore `X-Forwarded-*` |
+Change the dashboard username and password in **Settings → Profile**. Passwords must contain at least 12 characters.
 
-## Login & password
-
-First start generates credentials (shown once in logs). Change later:
+The CLI fallback remains available:
 
 ```bash
 npm run change-password
-# Docker: docker exec -it <container> npm run change-password
 ```
 
-Minimum 12 characters.
+## Data security
 
-## API
-
-Browser → local Express app → [Hetzner DNS API](https://docs.hetzner.cloud/reference/cloud#tag/zones) and Poste.io admin API. Keys stay server-side.
-
-## License
-
-MIT
+Provider credentials are encrypted with AES-256-GCM before being written to `/app/data/settings.enc`. The encryption key is derived from the persistent, randomly generated dashboard session secret. Files are created with owner-only permissions and the container runs as a non-root user.

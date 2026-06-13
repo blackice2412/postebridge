@@ -1,0 +1,46 @@
+name: postebridge
+
+services:
+  postebridge:
+    build:
+      context: .
+    image: postebridge:local
+    restart: unless-stopped
+    ports:
+      - "3847:3847"
+    volumes:
+      - postebridge-data:/app/data
+    depends_on:
+      poste:
+        condition: service_started
+    networks:
+      - postebridge
+
+  poste:
+    image: analogic/poste.io:latest
+    restart: unless-stopped
+    hostname: mailserver
+    environment:
+      TZ: UTC
+      HTTPS: "OFF"
+    ports:
+      - "25:25"
+      - "8080:80"
+      - "110:110"
+      - "143:143"
+      - "465:465"
+      - "587:587"
+      - "993:993"
+      - "995:995"
+      - "4190:4190"
+    volumes:
+      - poste-data:/data
+    networks:
+      - postebridge
+
+networks:
+  postebridge:
+
+volumes:
+  postebridge-data:
+  poste-data:
