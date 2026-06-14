@@ -29,11 +29,11 @@ defineEmits(["navigate"]);
       </div>
       <div class="metric-item">
         <component
-          :is="settings.providers[provider]?.configured ? CheckCircle2 : CircleAlert"
+          :is="settings.connections.length ? CheckCircle2 : CircleAlert"
           :size="20"
         />
         <div>
-          <strong>{{ settings.providers[provider]?.configured ? "Connected" : "Action needed" }}</strong>
+          <strong>{{ settings.connections.length ? "Connected" : "Action needed" }}</strong>
           <span>DNS provider</span>
         </div>
       </div>
@@ -53,7 +53,7 @@ defineEmits(["navigate"]);
       </div>
       <div class="checklist">
         <button class="check-row" @click="$emit('navigate', 'settings')">
-          <CheckCircle2 v-if="settings.providers.hetzner.configured || settings.providers.hostinger.configured" :size="19" class="ok" />
+          <CheckCircle2 v-if="settings.connections.length" :size="19" class="ok" />
           <CircleAlert v-else :size="19" class="warn" />
           <span><strong>Connect a DNS provider</strong><small>Hetzner Cloud or Hostinger API access</small></span>
           <ArrowRight :size="17" />

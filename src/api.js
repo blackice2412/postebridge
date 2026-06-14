@@ -15,7 +15,7 @@ export async function api(path, options = {}) {
   return data;
 }
 
-export function withProvider(path, provider) {
+export function withConnection(path, connectionId) {
   const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}provider=${encodeURIComponent(provider)}`;
+  return `${path}${separator}connectionId=${encodeURIComponent(connectionId)}`;
 }

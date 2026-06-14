@@ -1,6 +1,6 @@
 # PosteBridge
 
-PosteBridge is a private Vue dashboard for DNS and Poste.io mail operations. It supports Hetzner Cloud DNS and Hostinger DNS, keeps provider credentials encrypted on disk, manages Poste domains and mailboxes, checks DNS propagation, and updates Hetzner reverse DNS.
+PosteBridge is a private Vue dashboard for DNS and Poste.io mail operations. It supports multiple named Hetzner Cloud DNS and Hostinger DNS connections, keeps provider credentials encrypted on disk, manages Poste domains and mailboxes, checks DNS propagation, and updates Hetzner reverse DNS.
 
 ## Start everything
 
@@ -18,12 +18,16 @@ Open:
 
 Complete Poste.io's initial admin setup, then open **PosteBridge → Settings** and enter:
 
-- A Hetzner API key and/or Hostinger API token
+- One or more named Hetzner or Hostinger connections and their API keys
 - Poste URL `http://poste`
 - The Poste.io admin email and password created in the setup screen
 - An optional public mail hostname such as `mail.example.com`
 
 No `.env` file is used for credentials.
+
+Each DNS connection is verified before it is saved. The Settings page shows
+general account details such as zone, domain, and server counts. Use the active
+connection selector in the top bar to switch between accounts.
 
 ## Use an existing Poste.io server
 
@@ -94,6 +98,10 @@ An internet-facing mail server also needs:
 - Correct MX, SPF, DKIM, and DMARC records
 
 PosteBridge can apply the DNS records and set Hetzner PTR records.
+
+For any mailbox, select the cable icon to open **Third-party mail integration**.
+The dialog shows copyable SMTP, IMAP, and POP3 server settings for Outlook,
+Apple Mail, Thunderbird, Gmail, and other clients.
 
 ## Provider behavior
 

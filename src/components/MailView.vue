@@ -1,8 +1,10 @@
 <script setup>
 import { computed, reactive, ref, watch } from "vue";
 import {
+  Cable,
   CheckCircle2,
   CircleAlert,
+  Copy,
   ExternalLink,
   KeyRound,
   Mail,
@@ -13,10 +15,11 @@ import {
   WandSparkles,
 } from "@lucide/vue";
 import BaseModal from "./BaseModal.vue";
-import { api, withProvider } from "../api.js";
+import { api, withConnection } from "../api.js";
 
 const props = defineProps({
   provider: { type: String, required: true },
+  connectionId: { type: String, required: true },
   selectedZone: Object,
   posteConfigured: Boolean,
 });
@@ -29,6 +32,7 @@ const dnsState = ref(null);
 const mailboxes = ref([]);
 const overview = ref(null);
 const mailboxModal = ref(false);
+const integrationMailbox = ref(null);
 const mailboxForm = reactive({
   local: "",
   name: "",
@@ -36,6 +40,12 @@ const mailboxForm = reactive({
   password: "",
 });
 const dmarcEmail = ref("");
+const mailHost = computed(
+  () =>
+    dnsState.value?.mailHost ||
+    status.value?.mailHost ||
+    (props.selectedZone ? `mail.${props.selectedZone.name}` : "")
+);
 
 const pendingCount = computed(() =>
   Object.values(dnsState.value?.gaps || {}).filter((gap) => gap.status !== "present").length
@@ -47,7 +57,11 @@ const dnsComplete = computed(
 );
 
 watch(
-  [() => props.selectedZone?.id, () => props.provider, () => props.posteConfigured],
+  [
+    () => props.selectedZone?.id,
+    () => props.connectionId,
+    () => props.posteConfigured,
+  ],
   () => load(),
   { immediate: true }
 );
@@ -58,20 +72,25 @@ async function load() {
   dnsState.value = null;
   mailboxes.value = [];
   overview.value = null;
-  if (!props.posteConfigured) return;
+  if (!props.posteConfigured || !props.connectionId) return;
 
   loading.value = true;
   try {
-    status.value = await api("/api/poste/status");
-    overview.value = await api(withProvider("/api/poste/overview", props.provider));
+    const statusPath = props.selectedZone
+      ? `/api/poste/status?domain=${encodeURIComponent(props.selectedZone.name)}`
+      : "/api/poste/status";
+    status.value = await api(statusPath);
+    overview.value = await api(
+      withConnection("/api/poste/overview", props.connectionId)
+    );
     if (!props.selectedZone) return;
 
     const domain = encodeURIComponent(props.selectedZone.name);
-    const providerQuery = `provider=${encodeURIComponent(props.provider)}`;
+    const connectionQuery = `connectionId=${encodeURIComponent(props.connectionId)}`;
     const [domainData, dnsData, mailboxData] = await Promise.all([
       api(`/api/poste/domains/${domain}`),
       api(
-        `/api/poste/domains/${domain}/dns?zoneId=${encodeURIComponent(props.selectedZone.id)}&dmarcEmail=${encodeURIComponent(dmarcEmail.value || `postmaster@${props.selectedZone.name}`)}&${providerQuery}`
+        `/api/poste/domains/${domain}/dns?zoneId=${encodeURIComponent(props.selectedZone.id)}&dmarcEmail=${encodeURIComponent(dmarcEmail.value || `postmaster@${props.selectedZone.name}`)}&${connectionQuery}`
       ),
       api(`/api/poste/mailboxes?domain=${domain}`),
     ]);
@@ -91,14 +110,14 @@ async function setup(register) {
   loading.value = true;
   try {
     const data = await api(
-      withProvider(
+      withConnection(
         `/api/zones/${encodeURIComponent(props.selectedZone.id)}/poste-setup`,
-        props.provider
+        props.connectionId
       ),
       {
         method: "POST",
         body: JSON.stringify({
-          provider: props.provider,
+          connectionId: props.connectionId,
           domain: props.selectedZone.name,
           dmarcEmail: dmarcEmail.value,
           register,
@@ -188,6 +207,32 @@ async function deleteMailbox(address) {
 
 function openUrl(url) {
   if (url) window.open(url, "_blank", "noopener,noreferrer");
+}
+
+async function copyValue(value, label) {
+  try {
+    await navigator.clipboard.writeText(String(value));
+    emit("notify", `${label} copied`);
+  } catch {
+    emit("notify", "Could not access the clipboard", "error");
+  }
+}
+
+function copyAllSettings() {
+  const address = integrationMailbox.value?.address;
+  if (!address) return;
+  copyValue(
+    [
+      `Email / username: ${address}`,
+      `Password: your mailbox password`,
+      `IMAP: ${mailHost.value}:993 (SSL/TLS)`,
+      `POP3: ${mailHost.value}:995 (SSL/TLS)`,
+      `SMTP: ${mailHost.value}:587 (STARTTLS)`,
+      `SMTP alternative: ${mailHost.value}:465 (SSL/TLS)`,
+      "SMTP authentication: required",
+    ].join("\n"),
+    "Mail settings"
+  );
 }
 </script>
 
@@ -289,6 +334,13 @@ function openUrl(url) {
             <div v-for="mailbox in mailboxes" :key="mailbox.address" class="mailbox-row">
               <span class="mail-avatar">{{ mailbox.address.slice(0, 1).toUpperCase() }}</span>
               <span><strong>{{ mailbox.address }}</strong><small>{{ mailbox.name || "Mailbox" }}</small></span>
+              <button
+                class="button ghost compact mailbox-setup-button"
+                title="Third-party mail integration"
+                @click="integrationMailbox = mailbox"
+              >
+                <Cable :size="15" /> Setup
+              </button>
               <button class="icon-button" title="Reset password" @click="resetPassword(mailbox.address)">
                 <KeyRound :size="16" />
               </button>
@@ -345,6 +397,81 @@ function openUrl(url) {
           <button class="button primary" :disabled="loading">Create mailbox</button>
         </div>
       </form>
+    </BaseModal>
+
+    <BaseModal
+      v-if="integrationMailbox"
+      title="Third-party mail integration"
+      wide
+      @close="integrationMailbox = null"
+    >
+      <div class="integration-modal">
+        <div class="integration-intro">
+          <div>
+            <span class="mail-avatar">{{ integrationMailbox.address.slice(0, 1).toUpperCase() }}</span>
+            <div>
+              <strong>{{ integrationMailbox.address }}</strong>
+              <p>Use these values in Outlook, Apple Mail, Thunderbird, Gmail, or another mail client.</p>
+            </div>
+          </div>
+          <button class="button secondary compact" type="button" @click="copyAllSettings">
+            <Copy :size="15" /> Copy all
+          </button>
+        </div>
+
+        <div class="client-identity">
+          <div class="integration-value">
+            <span>Email / username</span>
+            <code>{{ integrationMailbox.address }}</code>
+            <button class="icon-button" title="Copy username" @click="copyValue(integrationMailbox.address, 'Username')">
+              <Copy :size="15" />
+            </button>
+          </div>
+          <div class="integration-value">
+            <span>Password</span>
+            <code>Mailbox password</code>
+            <small>Use the password created or reset for this mailbox.</small>
+          </div>
+        </div>
+
+        <div class="protocol-grid">
+          <section class="protocol-card">
+            <header><strong>IMAP</strong><span>Recommended incoming mail</span></header>
+            <div class="integration-value">
+              <span>Server</span><code>{{ mailHost }}</code>
+              <button class="icon-button" title="Copy IMAP server" @click="copyValue(mailHost, 'IMAP server')"><Copy :size="15" /></button>
+            </div>
+            <div class="protocol-pair">
+              <span>Port <strong>993</strong><button class="icon-button" title="Copy IMAP port" @click="copyValue('993', 'IMAP port')"><Copy :size="14" /></button></span>
+              <span>Security <strong>SSL/TLS</strong><button class="icon-button" title="Copy IMAP security" @click="copyValue('SSL/TLS', 'IMAP security')"><Copy :size="14" /></button></span>
+            </div>
+          </section>
+
+          <section class="protocol-card">
+            <header><strong>POP3</strong><span>Download incoming mail</span></header>
+            <div class="integration-value">
+              <span>Server</span><code>{{ mailHost }}</code>
+              <button class="icon-button" title="Copy POP3 server" @click="copyValue(mailHost, 'POP3 server')"><Copy :size="15" /></button>
+            </div>
+            <div class="protocol-pair">
+              <span>Port <strong>995</strong><button class="icon-button" title="Copy POP3 port" @click="copyValue('995', 'POP3 port')"><Copy :size="14" /></button></span>
+              <span>Security <strong>SSL/TLS</strong><button class="icon-button" title="Copy POP3 security" @click="copyValue('SSL/TLS', 'POP3 security')"><Copy :size="14" /></button></span>
+            </div>
+          </section>
+
+          <section class="protocol-card smtp">
+            <header><strong>SMTP</strong><span>Outgoing mail · authentication required</span></header>
+            <div class="integration-value">
+              <span>Server</span><code>{{ mailHost }}</code>
+              <button class="icon-button" title="Copy SMTP server" @click="copyValue(mailHost, 'SMTP server')"><Copy :size="15" /></button>
+            </div>
+            <div class="protocol-pair">
+              <span>Recommended <strong>587 · STARTTLS</strong><button class="icon-button" title="Copy recommended SMTP settings" @click="copyValue('587 / STARTTLS', 'SMTP settings')"><Copy :size="14" /></button></span>
+              <span>Alternative <strong>465 · SSL/TLS</strong><button class="icon-button" title="Copy alternative SMTP settings" @click="copyValue('465 / SSL/TLS', 'Alternative SMTP settings')"><Copy :size="14" /></button></span>
+            </div>
+          </section>
+        </div>
+      </div>
     </BaseModal>
   </div>
 </template>

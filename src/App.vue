@@ -13,7 +13,7 @@ import {
   Settings,
   X,
 } from "@lucide/vue";
-import { api, withProvider } from "./api.js";
+import { api, withConnection } from "./api.js";
 import DnsView from "./components/DnsView.vue";
 import LoginScreen from "./components/LoginScreen.vue";
 import MailView from "./components/MailView.vue";
@@ -26,14 +26,11 @@ const checkingAuth = ref(true);
 const authenticated = ref(false);
 const profile = ref({ username: "" });
 const settings = ref({
-  activeProvider: "hetzner",
-  providers: {
-    hetzner: { configured: false },
-    hostinger: { configured: false },
-  },
+  activeConnectionId: "",
+  connections: [],
   poste: { configured: false, baseUrl: "http://poste", adminEmail: "", mailHost: "" },
 });
-const provider = ref("hetzner");
+const activeConnectionId = ref("");
 const view = ref("overview");
 const zones = ref([]);
 const records = ref([]);
@@ -47,11 +44,15 @@ let toastTimer;
 const selectedZone = computed(() =>
   zones.value.find((zone) => String(zone.id) === String(selectedZoneId.value))
 );
-const providerConfigured = computed(
-  () => settings.value.providers[provider.value]?.configured
+const activeConnection = computed(() =>
+  settings.value.connections.find(
+    (connection) => connection.id === activeConnectionId.value
+  )
 );
+const provider = computed(() => activeConnection.value?.provider || "");
+const providerConfigured = computed(() => Boolean(activeConnection.value?.configured));
 const providerLabel = computed(() =>
-  provider.value === "hetzner" ? "Hetzner DNS" : "Hostinger DNS"
+  activeConnection.value?.name || "DNS connection"
 );
 const pageMeta = computed(
   () =>
@@ -111,7 +112,7 @@ async function bootstrap() {
 
 async function loadSettings() {
   settings.value = await api("/api/settings");
-  provider.value = settings.value.activeProvider;
+  activeConnectionId.value = settings.value.activeConnectionId;
 }
 
 async function loadZones(preferredZoneId) {
@@ -123,7 +124,9 @@ async function loadZones(preferredZoneId) {
   }
   loading.value = true;
   try {
-    const data = await api(withProvider("/api/zones", provider.value));
+    const data = await api(
+      withConnection("/api/zones", activeConnectionId.value)
+    );
     zones.value = data.zones || [];
     const availableIds = new Set(zones.value.map((zone) => String(zone.id)));
     const candidate =
@@ -148,9 +151,9 @@ async function loadRecords() {
   loading.value = true;
   try {
     const data = await api(
-      withProvider(
+      withConnection(
         `/api/zones/${encodeURIComponent(selectedZoneId.value)}/rrsets`,
-        provider.value
+        activeConnectionId.value
       )
     );
     records.value = data.rrsets || [];
@@ -166,17 +169,19 @@ async function selectZone(zoneId) {
   await loadRecords();
 }
 
-async function switchProvider(event) {
-  provider.value = event.target.value;
+async function switchConnection(event) {
+  const previousConnectionId = settings.value.activeConnectionId;
+  activeConnectionId.value = event.target.value;
   busy.value = true;
   try {
     settings.value = await api("/api/settings", {
       method: "PUT",
-      body: JSON.stringify({ activeProvider: provider.value }),
+      body: JSON.stringify({ activeConnectionId: activeConnectionId.value }),
     });
     selectedZoneId.value = "";
     await loadZones();
   } catch (err) {
+    activeConnectionId.value = previousConnectionId;
     notify(err.message, "error");
   } finally {
     busy.value = false;
@@ -190,8 +195,48 @@ async function saveSettings(payload) {
       method: "PUT",
       body: JSON.stringify(payload),
     });
-    provider.value = settings.value.activeProvider;
-    notify("Connection settings saved");
+    activeConnectionId.value = settings.value.activeConnectionId;
+    notify("Settings saved");
+    await loadZones();
+  } catch (err) {
+    notify(err.message, "error");
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function addConnection(payload, callbacks = {}) {
+  busy.value = true;
+  try {
+    const created = await api("/api/connections", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    settings.value = await api("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ activeConnectionId: created.connection.id }),
+    });
+    activeConnectionId.value = created.connection.id;
+    notify(`${created.connection.name} connected`);
+    await loadZones();
+    callbacks.onSuccess?.(created.connection);
+  } catch (err) {
+    notify(err.message, "error");
+    callbacks.onError?.(err.message);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function deleteConnection(connectionId) {
+  busy.value = true;
+  try {
+    settings.value = await api(
+      `/api/connections/${encodeURIComponent(connectionId)}`,
+      { method: "DELETE" }
+    );
+    activeConnectionId.value = settings.value.activeConnectionId;
+    notify("Connection removed");
     await loadZones();
   } catch (err) {
     notify(err.message, "error");
@@ -284,12 +329,18 @@ onMounted(bootstrap);
         <button class="menu-button" @click="sidebarOpen = true"><Menu :size="21" /></button>
         <div class="topbar-spacer"></div>
         <label class="provider-control">
-          <span>Active provider</span>
+          <span>Active connection</span>
           <div>
             <span class="provider-mark" :class="provider">{{ provider === "hetzner" ? "H" : "H" }}</span>
-            <select :value="provider" :disabled="busy" @change="switchProvider">
-              <option value="hetzner">Hetzner DNS</option>
-              <option value="hostinger">Hostinger DNS</option>
+            <select :value="activeConnectionId" :disabled="busy" @change="switchConnection">
+              <option v-if="!settings.connections.length" value="">No connections</option>
+              <option
+                v-for="connection in settings.connections"
+                :key="connection.id"
+                :value="connection.id"
+              >
+                {{ connection.name }} · {{ connection.provider }}
+              </option>
             </select>
             <ChevronDown :size="15" />
           </div>
@@ -324,6 +375,7 @@ onMounted(bootstrap);
         <DnsView
           v-else-if="view === 'dns'"
           :provider="provider"
+          :connection-id="activeConnectionId"
           :zones="zones"
           :selected-zone-id="selectedZoneId"
           :records="records"
@@ -336,6 +388,7 @@ onMounted(bootstrap);
         <MailView
           v-else-if="view === 'mail'"
           :provider="provider"
+          :connection-id="activeConnectionId"
           :selected-zone="selectedZone"
           :poste-configured="settings.poste.configured"
           @notify="notify"
@@ -350,6 +403,7 @@ onMounted(bootstrap);
         <ReverseDnsView
           v-else-if="view === 'rdns'"
           :provider="provider"
+          :connection-id="activeConnectionId"
           :selected-zone="selectedZone"
           @notify="notify"
         />
@@ -359,6 +413,8 @@ onMounted(bootstrap);
           :profile="profile"
           :busy="busy"
           @save-settings="saveSettings"
+          @add-connection="addConnection"
+          @delete-connection="deleteConnection"
           @save-profile="saveProfile"
         />
       </main>

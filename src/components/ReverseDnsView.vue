@@ -1,10 +1,11 @@
 <script setup>
 import { reactive, ref, watch } from "vue";
 import { RotateCcw, Server } from "@lucide/vue";
-import { api, withProvider } from "../api.js";
+import { api, withConnection } from "../api.js";
 
 const props = defineProps({
   provider: { type: String, required: true },
+  connectionId: { type: String, required: true },
   selectedZone: Object,
 });
 const emit = defineEmits(["notify"]);
@@ -13,7 +14,7 @@ const loading = ref(false);
 const form = reactive({ serverId: "", ptr: "" });
 
 watch(
-  () => props.provider,
+  () => props.connectionId,
   () => loadServers(),
   { immediate: true }
 );
@@ -25,7 +26,7 @@ async function loadServers() {
   loading.value = true;
   try {
     servers.value = (
-      await api(withProvider("/api/servers", props.provider))
+      await api(withConnection("/api/servers", props.connectionId))
     ).servers;
   } catch (err) {
     emit("notify", err.message, "error");
@@ -49,11 +50,11 @@ async function save() {
   loading.value = true;
   try {
     await api(
-      withProvider(`/api/servers/${server.id}/rdns`, props.provider),
+      withConnection(`/api/servers/${server.id}/rdns`, props.connectionId),
       {
         method: "POST",
         body: JSON.stringify({
-          provider: props.provider,
+          connectionId: props.connectionId,
           ip: server.ipv4,
           dns_ptr: form.ptr,
         }),

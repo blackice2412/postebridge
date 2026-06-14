@@ -13,13 +13,15 @@ import {
   generatePassword,
 } from "./lib/auth.js";
 import {
+  addConnection,
+  deleteConnection,
+  getConnection,
   getPublicSettings,
   getSettings,
   loadSettings,
   updateSettings,
 } from "./lib/settings.js";
 import { createHostingerClient } from "./lib/hostinger.js";
-import { resolveProvider } from "./lib/providers.js";
 import { runDnsCheck, SUPPORTED_TYPES } from "./lib/dns-checker.js";
 import {
   isPosteConfigured,
@@ -164,6 +166,40 @@ app.put("/api/settings", async (req, res) => {
   }
 });
 
+app.post("/api/connections", async (req, res) => {
+  try {
+    const details = await getConnectionDetails(req.body);
+    const connection = await addConnection(req.body);
+    res.status(201).json({
+      connection,
+      details,
+      settings: getPublicSettings(),
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/connections/:connectionId", async (req, res) => {
+  try {
+    res.json(await deleteConnection(req.params.connectionId));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.get("/api/connections/:connectionId/details", async (req, res) => {
+  try {
+    const connection = getConnection(req.params.connectionId);
+    if (!connection) {
+      return res.status(404).json({ error: "Connection not found" });
+    }
+    res.json(await getConnectionDetails(connection));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 app.get("/api/profile", async (_req, res) => {
   res.json(await getProfile());
 });
@@ -192,10 +228,44 @@ app.get("/api/dns-check/types", (_req, res) => {
   res.json({ types: [...SUPPORTED_TYPES] });
 });
 
-async function hetzner(pathname, options = {}) {
-  const apiKey = getSettings().providers.hetzner.apiKey;
+function connectionForRequest(req) {
+  const settings = getSettings();
+  const requestedId = req.query.connectionId || req.body?.connectionId;
+  if (requestedId) {
+    const connection = getConnection(requestedId);
+    if (!connection) {
+      const err = new Error("Connection not found");
+      err.status = 404;
+      throw err;
+    }
+    return connection;
+  }
+
+  const requestedProvider = req.query.provider || req.body?.provider;
+  const active = getConnection(settings.activeConnectionId);
+  if (!requestedProvider || active?.provider === requestedProvider) {
+    if (active) return active;
+  }
+
+  const matches = settings.connections.filter(
+    (connection) => connection.provider === requestedProvider
+  );
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    const err = new Error("Choose a specific connection");
+    err.status = 400;
+    throw err;
+  }
+
+  const err = new Error("Add a DNS connection in Settings");
+  err.status = 503;
+  throw err;
+}
+
+async function hetzner(pathname, options = {}, connection = getConnection()) {
+  const apiKey = connection?.apiKey;
   if (!apiKey) {
-    const err = new Error("Configure the Hetzner API key in Settings");
+    const err = new Error("Configure a Hetzner API key in Settings");
     err.status = 503;
     throw err;
   }
@@ -231,36 +301,35 @@ async function hetzner(pathname, options = {}) {
   return data;
 }
 
-function providerName(req) {
-  const requested = req.query.provider || req.body?.provider;
-  return resolveProvider(requested, getSettings().activeProvider);
+function hostingerClient(connection = getConnection()) {
+  return createHostingerClient(connection?.apiKey || connection?.apiToken);
 }
 
-function hostingerClient() {
-  return createHostingerClient(getSettings().providers.hostinger.apiToken);
-}
-
-async function listZones(provider) {
-  if (provider === "hostinger") {
-    return hostingerClient().listZones();
+async function listZones(connection) {
+  if (connection.provider === "hostinger") {
+    return hostingerClient(connection).listZones();
   }
-  return fetchAllPages("/zones", "zones");
+  return fetchAllPages("/zones", "zones", connection);
 }
 
-async function listRrsets(provider, zoneId) {
-  if (provider === "hostinger") {
-    return hostingerClient().listRrsets(zoneId);
+async function listRrsets(connection, zoneId) {
+  if (connection.provider === "hostinger") {
+    return hostingerClient(connection).listRrsets(zoneId);
   }
-  return fetchAllPages(`/zones/${zoneId}/rrsets`, "rrsets");
+  return fetchAllPages(`/zones/${zoneId}/rrsets`, "rrsets", connection);
 }
 
-async function fetchAllPages(pathname, key) {
+async function fetchAllPages(pathname, key, connection) {
   const items = [];
   let page = 1;
 
   while (true) {
     const sep = pathname.includes("?") ? "&" : "?";
-    const data = await hetzner(`${pathname}${sep}page=${page}&per_page=50`);
+    const data = await hetzner(
+      `${pathname}${sep}page=${page}&per_page=50`,
+      {},
+      connection
+    );
     items.push(...(data[key] || []));
 
     const pagination = data.meta?.pagination;
@@ -332,8 +401,12 @@ function recordsEquivalent(type, left, right) {
   return leftValues.join("\n") === rightValues.join("\n");
 }
 
-async function findRrset(zoneId, name, type, zoneName) {
-  const rrsets = await fetchAllPages(`/zones/${zoneId}/rrsets`, "rrsets");
+async function findRrset(zoneId, name, type, zoneName, connection) {
+  const rrsets = await fetchAllPages(
+    `/zones/${zoneId}/rrsets`,
+    "rrsets",
+    connection
+  );
   return (
     rrsets.find(
       (rrset) => rrset.type === type && rrsetNamesEquivalent(rrset.name, name, zoneName)
@@ -341,20 +414,21 @@ async function findRrset(zoneId, name, type, zoneName) {
   );
 }
 
-async function resolveZoneName(zoneId, zoneName) {
+async function resolveZoneName(zoneId, zoneName, connection) {
   if (zoneName) return zoneName;
-  const data = await hetzner(`/zones/${zoneId}`);
+  const data = await hetzner(`/zones/${zoneId}`, {}, connection);
   return data.zone?.name;
 }
 
-async function setRrsetRecords(zoneId, name, type, ttl, records) {
+async function setRrsetRecords(zoneId, name, type, ttl, records, connection) {
   const encodedName = encodeRrsetName(name);
   return hetzner(
     `/zones/${zoneId}/rrsets/${encodedName}/${type}/actions/set_records`,
     {
       method: "POST",
       body: JSON.stringify({ ttl, records }),
-    }
+    },
+    connection
   );
 }
 
@@ -363,13 +437,14 @@ async function upsertRrset(zoneId, { name, type, ttl, records }, options = {}) {
     zoneName: zoneNameInput,
     mergeTxt = false,
     replaceDmarc = false,
-    provider = getSettings().activeProvider,
+    connection = getConnection(),
   } = options;
+  const provider = connection?.provider;
 
   if (provider === "hostinger") {
     let finalRecords = records;
     if (mergeTxt && type === "TXT") {
-      const rrsets = await listRrsets(provider, zoneId);
+      const rrsets = await listRrsets(connection, zoneId);
       const existing = rrsets.find(
         (rrset) =>
           rrset.type === type &&
@@ -385,7 +460,7 @@ async function upsertRrset(zoneId, { name, type, ttl, records }, options = {}) {
         }
       }
     }
-    return hostingerClient().upsertRrset(zoneId, {
+    return hostingerClient(connection).upsertRrset(zoneId, {
       name,
       type,
       ttl,
@@ -393,8 +468,8 @@ async function upsertRrset(zoneId, { name, type, ttl, records }, options = {}) {
     });
   }
 
-  const zoneName = await resolveZoneName(zoneId, zoneNameInput);
-  const existing = await findRrset(zoneId, name, type, zoneName);
+  const zoneName = await resolveZoneName(zoneId, zoneNameInput, connection);
+  const existing = await findRrset(zoneId, name, type, zoneName, connection);
   const apiName = existing?.name ?? name;
 
   let finalRecords = records;
@@ -408,7 +483,14 @@ async function upsertRrset(zoneId, { name, type, ttl, records }, options = {}) {
   }
 
   try {
-    return await setRrsetRecords(zoneId, apiName, type, ttl, finalRecords);
+    return await setRrsetRecords(
+      zoneId,
+      apiName,
+      type,
+      ttl,
+      finalRecords,
+      connection
+    );
   } catch (err) {
     const notFound =
       err.status === 404 || err.message?.toLowerCase().includes("not found");
@@ -416,30 +498,100 @@ async function upsertRrset(zoneId, { name, type, ttl, records }, options = {}) {
       err.status === 409 || err.message?.toLowerCase().includes("already exist");
 
     if (alreadyExists) {
-      const resolved = await findRrset(zoneId, name, type, zoneName);
+      const resolved = await findRrset(
+        zoneId,
+        name,
+        type,
+        zoneName,
+        connection
+      );
       if (resolved) {
-        return setRrsetRecords(zoneId, resolved.name, type, ttl, finalRecords);
+        return setRrsetRecords(
+          zoneId,
+          resolved.name,
+          type,
+          ttl,
+          finalRecords,
+          connection
+        );
       }
     }
 
     if (!notFound) throw err;
 
     try {
-      return await hetzner(`/zones/${zoneId}/rrsets`, {
-        method: "POST",
-        body: JSON.stringify({ name, type, ttl, records: finalRecords }),
-      });
+      return await hetzner(
+        `/zones/${zoneId}/rrsets`,
+        {
+          method: "POST",
+          body: JSON.stringify({ name, type, ttl, records: finalRecords }),
+        },
+        connection
+      );
     } catch (createErr) {
       const createExists =
         createErr.status === 409 ||
         createErr.message?.toLowerCase().includes("already exist");
       if (!createExists) throw createErr;
 
-      const resolved = await findRrset(zoneId, name, type, zoneName);
+      const resolved = await findRrset(
+        zoneId,
+        name,
+        type,
+        zoneName,
+        connection
+      );
       if (!resolved) throw createErr;
-      return setRrsetRecords(zoneId, resolved.name, type, ttl, finalRecords);
+      return setRrsetRecords(
+        zoneId,
+        resolved.name,
+        type,
+        ttl,
+        finalRecords,
+        connection
+      );
     }
   }
+}
+
+async function getConnectionDetails(connection) {
+  const candidate = {
+    ...connection,
+    apiKey: connection.apiKey || connection.apiToken,
+  };
+  if (!candidate.name || !["hetzner", "hostinger"].includes(candidate.provider)) {
+    const err = new Error("Connection name and provider are required");
+    err.status = 400;
+    throw err;
+  }
+  if (!candidate.apiKey) {
+    const err = new Error("API key is required");
+    err.status = 400;
+    throw err;
+  }
+  const zones = await listZones(candidate);
+  const details = {
+    provider: candidate.provider,
+    zoneCount: zones.length,
+    zones: zones.slice(0, 5).map((zone) => zone.name),
+  };
+
+  if (candidate.provider === "hetzner") {
+    try {
+      const servers = await fetchAllPages("/servers", "servers", candidate);
+      details.serverCount = servers.length;
+      details.servers = servers.slice(0, 5).map((server) => server.name);
+    } catch (err) {
+      details.serverCount = null;
+      details.serverAccessError = err.message;
+    }
+  } else {
+    details.activeDomainCount = zones.filter(
+      (zone) => String(zone.status).toLowerCase() === "active"
+    ).length;
+  }
+
+  return details;
 }
 
 const PROTECTED_RRSET_TYPES = new Set(["NS", "SOA"]);
@@ -454,9 +606,9 @@ function assertRrsetMutable(type) {
 
 app.get("/api/zones", async (_req, res) => {
   try {
-    const provider = providerName(_req);
-    const zones = await listZones(provider);
-    res.json({ zones, provider });
+    const connection = connectionForRequest(_req);
+    const zones = await listZones(connection);
+    res.json({ zones, provider: connection.provider });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
@@ -464,7 +616,8 @@ app.get("/api/zones", async (_req, res) => {
 
 app.post("/api/zones", async (req, res) => {
   try {
-    if (providerName(req) === "hostinger") {
+    const connection = connectionForRequest(req);
+    if (connection.provider === "hostinger") {
       return res.status(405).json({
         error: "Hostinger creates DNS zones from domains in your account",
       });
@@ -472,10 +625,14 @@ app.post("/api/zones", async (req, res) => {
     const { name, ttl = 3600 } = req.body;
     if (!name) return res.status(400).json({ error: "Zone name is required" });
 
-    const data = await hetzner("/zones", {
-      method: "POST",
-      body: JSON.stringify({ name, mode: "primary", ttl }),
-    });
+    const data = await hetzner(
+      "/zones",
+      {
+        method: "POST",
+        body: JSON.stringify({ name, mode: "primary", ttl }),
+      },
+      connection
+    );
     res.json(data);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -484,7 +641,10 @@ app.post("/api/zones", async (req, res) => {
 
 app.get("/api/zones/:zoneId/rrsets", async (req, res) => {
   try {
-    const rrsets = await listRrsets(providerName(req), req.params.zoneId);
+    const rrsets = await listRrsets(
+      connectionForRequest(req),
+      req.params.zoneId
+    );
     res.json({ rrsets });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -499,18 +659,22 @@ app.post("/api/zones/:zoneId/rrsets", async (req, res) => {
     }
     assertRrsetMutable(type);
 
-    const provider = providerName(req);
+    const connection = connectionForRequest(req);
     const data =
-      provider === "hostinger"
+      connection.provider === "hostinger"
         ? await upsertRrset(
             req.params.zoneId,
             { name, type, ttl, records },
-            { provider, zoneName: req.params.zoneId }
+            { connection, zoneName: req.params.zoneId }
           )
-        : await hetzner(`/zones/${req.params.zoneId}/rrsets`, {
-            method: "POST",
-            body: JSON.stringify({ name, type, ttl, records }),
-          });
+        : await hetzner(
+            `/zones/${req.params.zoneId}/rrsets`,
+            {
+              method: "POST",
+              body: JSON.stringify({ name, type, ttl, records }),
+            },
+            connection
+          );
     res.json(data);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -526,10 +690,11 @@ app.put("/api/zones/:zoneId/rrsets/:name/:type", async (req, res) => {
       return res.status(400).json({ error: "records are required" });
     }
 
+    const connection = connectionForRequest(req);
     const data = await upsertRrset(
       zoneId,
       { name, type, ttl, records },
-      { provider: providerName(req), zoneName: zoneId }
+      { connection, zoneName: zoneId }
     );
     res.json(data);
   } catch (err) {
@@ -541,13 +706,14 @@ app.delete("/api/zones/:zoneId/rrsets/:name/:type", async (req, res) => {
   try {
     const { zoneId, name, type } = req.params;
     assertRrsetMutable(type);
-    const provider = providerName(req);
+    const connection = connectionForRequest(req);
     const data =
-      provider === "hostinger"
-        ? await hostingerClient().deleteRrset(zoneId, name, type)
+      connection.provider === "hostinger"
+        ? await hostingerClient(connection).deleteRrset(zoneId, name, type)
         : await hetzner(
             `/zones/${zoneId}/rrsets/${encodeRrsetName(name)}/${type}`,
-            { method: "DELETE" }
+            { method: "DELETE" },
+            connection
           );
     res.json(data);
   } catch (err) {
@@ -557,12 +723,17 @@ app.delete("/api/zones/:zoneId/rrsets/:name/:type", async (req, res) => {
 
 app.delete("/api/zones/:zoneId", async (req, res) => {
   try {
-    if (providerName(req) === "hostinger") {
+    const connection = connectionForRequest(req);
+    if (connection.provider === "hostinger") {
       return res.status(405).json({
         error: "Delete Hostinger domains from hPanel, not from DNS management",
       });
     }
-    const data = await hetzner(`/zones/${req.params.zoneId}`, { method: "DELETE" });
+    const data = await hetzner(
+      `/zones/${req.params.zoneId}`,
+      { method: "DELETE" },
+      connection
+    );
     res.json(data);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -571,10 +742,11 @@ app.delete("/api/zones/:zoneId", async (req, res) => {
 
 app.get("/api/servers", async (_req, res) => {
   try {
-    if (providerName(_req) !== "hetzner") {
-      return res.json({ servers: [], provider: providerName(_req) });
+    const connection = connectionForRequest(_req);
+    if (connection.provider !== "hetzner") {
+      return res.json({ servers: [], provider: connection.provider });
     }
-    const servers = await fetchAllPages("/servers", "servers");
+    const servers = await fetchAllPages("/servers", "servers", connection);
     res.json({
       servers: servers.map((s) => ({
         id: s.id,
@@ -592,7 +764,8 @@ app.get("/api/servers", async (_req, res) => {
 
 app.post("/api/servers/:serverId/rdns", async (req, res) => {
   try {
-    if (providerName(req) !== "hetzner") {
+    const connection = connectionForRequest(req);
+    if (connection.provider !== "hetzner") {
       return res.status(405).json({
         error: "Reverse DNS management is currently available for Hetzner only",
       });
@@ -608,7 +781,8 @@ app.post("/api/servers/:serverId/rdns", async (req, res) => {
       {
         method: "POST",
         body: JSON.stringify({ ip, dns_ptr: cleanPtr }),
-      }
+      },
+      connection
     );
     res.json(data);
   } catch (err) {
@@ -666,7 +840,7 @@ app.post("/api/zones/:zoneId/mail-setup", async (req, res) => {
       },
     ];
 
-    const provider = providerName(req);
+    const connection = connectionForRequest(req);
     const results = [];
     for (const rrset of records) {
       try {
@@ -674,7 +848,7 @@ app.post("/api/zones/:zoneId/mail-setup", async (req, res) => {
           zoneName: domain,
           mergeTxt: rrset.type === "TXT",
           replaceDmarc: rrset.name === "_dmarc",
-          provider,
+          connection,
         });
         results.push({
           name: rrset.name,
@@ -708,7 +882,7 @@ function requirePoste(_req, res, next) {
   next();
 }
 
-async function applyRrsetsToZone(zoneId, domain, rrsets, provider) {
+async function applyRrsetsToZone(zoneId, domain, rrsets, connection) {
   const results = [];
   for (const rrset of rrsets) {
     try {
@@ -716,7 +890,7 @@ async function applyRrsetsToZone(zoneId, domain, rrsets, provider) {
         zoneName: domain,
         mergeTxt: Boolean(rrset.mergeTxt),
         replaceDmarc: Boolean(rrset.replaceDmarc),
-        provider,
+        connection,
       });
       results.push({
         name: rrset.name,
@@ -767,10 +941,10 @@ app.get("/api/poste/domains", requirePoste, async (_req, res) => {
 
 app.get("/api/poste/overview", requirePoste, async (_req, res) => {
   try {
-    const provider = providerName(_req);
+    const connection = connectionForRequest(_req);
     const [posteDomains, dnsZones] = await Promise.all([
       listPosteDomains(),
-      listZones(provider),
+      listZones(connection),
     ]);
     const zoneByName = new Map(dnsZones.map((zone) => [zone.name, zone.id]));
     const posteNames = new Set(posteDomains.map((domain) => domain.name));
@@ -798,7 +972,7 @@ app.get("/api/poste/overview", requirePoste, async (_req, res) => {
         unlinked: domains.filter((domain) => !domain.zoneId).length,
         unmanagedZones: unmanagedZones.length,
       },
-      provider,
+      provider: connection.provider,
       ...getPosteUrls(),
     });
   } catch (err) {
@@ -826,7 +1000,7 @@ app.get("/api/poste/domains/:name/health", requirePoste, async (req, res) => {
     let toApply = null;
     let dnsComplete = null;
     if (zoneId) {
-      const rrsets = await listRrsets(providerName(req), zoneId);
+      const rrsets = await listRrsets(connectionForRequest(req), zoneId);
       const analysis = analyzeDnsGaps(domain, dns, rrsets, formatTxt);
       gaps = analysis.gaps;
       toApply = analysis.toApply;
@@ -873,7 +1047,7 @@ app.get("/api/poste/domains/:name/dns", requirePoste, async (req, res) => {
     let gaps = null;
     let toApply = null;
     if (zoneId) {
-      const rrsets = await listRrsets(providerName(req), zoneId);
+      const rrsets = await listRrsets(connectionForRequest(req), zoneId);
       const analysis = analyzeDnsGaps(domain, dns, rrsets, formatTxt);
       gaps = analysis.gaps;
       toApply = analysis.toApply;
@@ -905,14 +1079,14 @@ app.post("/api/zones/:zoneId/poste-setup", requirePoste, async (req, res) => {
     if (!domain) return res.status(400).json({ error: "domain is required" });
 
     const dns = await fetchPosteDnsBundle(domain, { dmarcEmail });
-    const provider = providerName(req);
-    const rrsets = await listRrsets(provider, zoneId);
+    const connection = connectionForRequest(req);
+    const rrsets = await listRrsets(connection, zoneId);
     const { gaps, toApply } = analyzeDnsGaps(domain, dns, rrsets, formatTxt);
     const dnsResults = await applyRrsetsToZone(
       zoneId,
       domain,
       toApply,
-      provider
+      connection
     );
 
     let registration = null;

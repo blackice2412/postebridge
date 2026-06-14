@@ -11,10 +11,11 @@ import {
   Trash2,
 } from "@lucide/vue";
 import BaseModal from "./BaseModal.vue";
-import { api, withProvider } from "../api.js";
+import { api, withConnection } from "../api.js";
 
 const props = defineProps({
   provider: { type: String, required: true },
+  connectionId: { type: String, required: true },
   zones: { type: Array, required: true },
   selectedZoneId: [String, Number],
   records: { type: Array, required: true },
@@ -87,19 +88,19 @@ async function saveRecord() {
       type: recordForm.type,
       ttl: Number(recordForm.ttl),
       records: normalizedRecords(),
-      provider: props.provider,
+      connectionId: props.connectionId,
     });
     const zoneId = encodeURIComponent(props.selectedZoneId);
     if (editing.value) {
       await api(
-        withProvider(
+        withConnection(
           `/api/zones/${zoneId}/rrsets/${encodeURIComponent(recordForm.name)}/${recordForm.type}`,
-          props.provider
+          props.connectionId
         ),
         { method: "PUT", body }
       );
     } else {
-      await api(withProvider(`/api/zones/${zoneId}/rrsets`, props.provider), {
+      await api(withConnection(`/api/zones/${zoneId}/rrsets`, props.connectionId), {
         method: "POST",
         body,
       });
@@ -118,9 +119,9 @@ async function deleteRecord(record) {
   if (!window.confirm(`Delete ${record.type} record ${record.name}?`)) return;
   try {
     await api(
-      withProvider(
+      withConnection(
         `/api/zones/${encodeURIComponent(props.selectedZoneId)}/rrsets/${encodeURIComponent(record.name)}/${record.type}`,
-        props.provider
+        props.connectionId
       ),
       { method: "DELETE" }
     );
@@ -134,12 +135,12 @@ async function deleteRecord(record) {
 async function createZone() {
   saving.value = true;
   try {
-    const data = await api(withProvider("/api/zones", props.provider), {
+    const data = await api(withConnection("/api/zones", props.connectionId), {
       method: "POST",
       body: JSON.stringify({
         ...zoneForm,
         ttl: Number(zoneForm.ttl),
-        provider: props.provider,
+        connectionId: props.connectionId,
       }),
     });
     zoneModal.value = false;
@@ -158,9 +159,9 @@ async function deleteZone() {
   if (!window.confirm(`Delete ${selectedZone.value.name} and all its records?`)) return;
   try {
     await api(
-      withProvider(
+      withConnection(
         `/api/zones/${encodeURIComponent(selectedZone.value.id)}`,
-        props.provider
+        props.connectionId
       ),
       { method: "DELETE" }
     );
