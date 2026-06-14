@@ -36,6 +36,7 @@ import {
   createPosteMailbox,
   deletePosteMailbox,
   resetPosteMailboxPassword,
+  verifyPosteConnection,
   resolveMailHost,
   ensurePosteDkim,
   getPosteDomainQuota,
@@ -160,6 +161,23 @@ app.get("/api/settings", (_req, res) => {
 
 app.put("/api/settings", async (req, res) => {
   try {
+    if (req.body.poste) {
+      const current = getSettings();
+      const mergedPoste = { ...current.poste };
+      for (const field of ["baseUrl", "adminEmail", "adminPassword", "mailHost"]) {
+        if (req.body.poste[field] !== undefined) {
+          mergedPoste[field] = String(req.body.poste[field]).trim();
+        }
+      }
+      mergedPoste.baseUrl = mergedPoste.baseUrl.replace(/\/$/, "");
+      if (
+        mergedPoste.baseUrl &&
+        mergedPoste.adminEmail &&
+        mergedPoste.adminPassword
+      ) {
+        await verifyPosteConnection(mergedPoste);
+      }
+    }
     res.json(await updateSettings(req.body));
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -324,7 +342,7 @@ async function hetzner(pathname, options = {}, connection = getConnection()) {
       data?.error?.message ||
       data?.message ||
       `Hetzner API error (${res.status})`;
-    const err = new Error(message);
+    const err = new Error(`Hetzner DNS: ${message}`);
     err.status = res.status;
     err.details = data?.error?.details;
     throw err;
@@ -971,13 +989,45 @@ app.get("/api/poste/domains", requirePoste, async (_req, res) => {
   }
 });
 
+app.get("/api/poste/details", requirePoste, async (_req, res) => {
+  try {
+    const domains = await listPosteDomains();
+    res.json({
+      domainCount: domains.length,
+      domains: domains.slice(0, 5).map((domain) => domain.name),
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 app.get("/api/poste/overview", requirePoste, async (_req, res) => {
   try {
     const connection = connectionForRequest(_req);
-    const [posteDomains, dnsZones] = await Promise.all([
-      listPosteDomains(),
-      listZones(connection),
-    ]);
+    const warnings = [];
+    let posteDomains = [];
+    let dnsZones = [];
+
+    try {
+      posteDomains = await listPosteDomains();
+    } catch (err) {
+      warnings.push(err.message);
+    }
+
+    try {
+      dnsZones = await listZones(connection);
+    } catch (err) {
+      warnings.push(err.message);
+    }
+
+    if (!posteDomains.length && !dnsZones.length && warnings.length) {
+      const status = warnings.some((message) => message.includes("401")) ? 401 : 502;
+      return res.status(status).json({
+        error: warnings.join(" · "),
+        warnings,
+      });
+    }
+
     const zoneByName = new Map(dnsZones.map((zone) => [zone.name, zone.id]));
     const posteNames = new Set(posteDomains.map((domain) => domain.name));
     const domains = await Promise.all(
@@ -1005,6 +1055,7 @@ app.get("/api/poste/overview", requirePoste, async (_req, res) => {
         unmanagedZones: unmanagedZones.length,
       },
       provider: connection.provider,
+      warnings,
       ...getPosteUrls(),
     });
   } catch (err) {

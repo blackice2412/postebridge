@@ -88,9 +88,16 @@ async function load() {
       ? `/api/poste/status?domain=${encodeURIComponent(props.selectedZone.name)}`
       : "/api/poste/status";
     status.value = await api(statusPath);
-    overview.value = await api(
-      withConnection("/api/poste/overview", props.connectionId)
-    );
+    try {
+      overview.value = await api(
+        withConnection("/api/poste/overview", props.connectionId)
+      );
+      if (overview.value.warnings?.length) {
+        emit("notify", overview.value.warnings.join(" · "), "error");
+      }
+    } catch (err) {
+      emit("notify", err.message, "error");
+    }
     if (!props.selectedZone) return;
 
     const domain = encodeURIComponent(props.selectedZone.name);

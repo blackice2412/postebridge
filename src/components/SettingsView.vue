@@ -50,6 +50,8 @@ const profileForm = reactive({
   confirmPassword: "",
 });
 const profileError = ref("");
+const posteDetails = ref(null);
+const loadingPosteDetails = ref(false);
 
 watch(
   () => props.settings,
@@ -57,6 +59,11 @@ watch(
     posteForm.baseUrl = value.poste?.baseUrl || "http://poste";
     posteForm.adminEmail = value.poste?.adminEmail || "";
     posteForm.mailHost = value.poste?.mailHost || "";
+    if (value.poste?.configured) {
+      loadPosteDetails();
+    } else {
+      posteDetails.value = null;
+    }
     for (const connection of value.connections || []) {
       if (!details[connection.id] && !loadingDetails[connection.id]) {
         loadDetails(connection.id);
@@ -73,6 +80,21 @@ watch(
   },
   { immediate: true, deep: true }
 );
+
+async function loadPosteDetails() {
+  if (!props.settings.poste?.configured) {
+    posteDetails.value = null;
+    return;
+  }
+  loadingPosteDetails.value = true;
+  try {
+    posteDetails.value = await api("/api/poste/details");
+  } catch (err) {
+    posteDetails.value = { error: err.message };
+  } finally {
+    loadingPosteDetails.value = false;
+  }
+}
 
 async function loadDetails(connectionId) {
   loadingDetails[connectionId] = true;
@@ -259,6 +281,28 @@ function saveProfile() {
               :placeholder="settings.poste.configured ? 'Enter a new password to replace it' : 'Poste.io admin password'"
             />
           </label>
+        </div>
+        <div v-if="settings.poste.configured" class="poste-status">
+          <div v-if="loadingPosteDetails" class="connection-loading">
+            <RefreshCw :size="15" class="spinning" /> Checking Poste.io connection...
+          </div>
+          <div v-else-if="posteDetails?.error" class="connection-error">
+            {{ posteDetails.error }}
+            <button class="text-button" type="button" @click="loadPosteDetails">Retry</button>
+          </div>
+          <div v-else-if="posteDetails" class="account-facts">
+            <span>
+              <Mail :size="16" />
+              <strong>{{ posteDetails.domainCount ?? "-" }}</strong>
+              Poste domains
+            </span>
+            <button class="icon-button" title="Refresh Poste.io status" type="button" @click="loadPosteDetails">
+              <RefreshCw :size="15" />
+            </button>
+          </div>
+          <p v-if="posteDetails?.domains?.length" class="account-resource-list">
+            {{ posteDetails.domains.join(", ") }}
+          </p>
         </div>
         <div class="panel-actions">
           <button
