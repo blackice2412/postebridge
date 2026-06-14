@@ -22,7 +22,7 @@ import {
   updateSettings,
 } from "./lib/settings.js";
 import { createHostingerClient } from "./lib/hostinger.js";
-import { runDnsCheck, SUPPORTED_TYPES } from "./lib/dns-checker.js";
+import { runDnsCheck, runDnsCheckStreaming, SUPPORTED_TYPES } from "./lib/dns-checker.js";
 import {
   isPosteConfigured,
   getPosteConfig,
@@ -221,6 +221,38 @@ app.post("/api/dns-check", async (req, res) => {
     res.json(data);
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/dns-check/stream", async (req, res) => {
+  const send = (payload) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  try {
+    const { hostname, types, expected } = req.body;
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+
+    const result = await runDnsCheckStreaming({
+      hostname,
+      types,
+      expected,
+      onCheck(check) {
+        send({ event: "check", check });
+      },
+    });
+    send({ event: "done", ...result });
+    res.end();
+  } catch (err) {
+    if (!res.headersSent) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    send({ event: "error", error: err.message });
+    res.end();
   }
 });
 

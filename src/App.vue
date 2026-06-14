@@ -396,6 +396,8 @@ onMounted(bootstrap);
         />
         <PropagationView
           v-else-if="view === 'propagation'"
+          :zones="zones"
+          :connection-id="activeConnectionId"
           :selected-zone="selectedZone"
           :records="records"
           @notify="notify"

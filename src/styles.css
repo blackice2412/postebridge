@@ -1149,9 +1149,92 @@ tbody tr:hover td {
 
 .propagation-form {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) auto auto auto;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto auto auto;
   align-items: end;
   gap: 15px;
+}
+
+.propagation-mode {
+  display: inline-flex;
+  overflow: hidden;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.propagation-mode button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 14px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: #081a2b;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.propagation-mode button:last-child {
+  border-right: 0;
+}
+
+.propagation-mode button.active {
+  background: var(--blue-soft);
+  color: #79b8ff;
+}
+
+.propagation-table-tools {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.propagation-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.progress-track {
+  width: 100%;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(121, 184, 255, 0.12);
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2f81f7, #58a6ff);
+  transition: width 180ms ease;
+}
+
+.row-status.checking {
+  color: var(--muted);
+}
+
+.row-checking {
+  opacity: 0.72;
+}
+
+.muted-copy {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.spinning {
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .type-choices {
