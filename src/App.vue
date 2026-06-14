@@ -191,12 +191,18 @@ async function switchConnection(event) {
 async function saveSettings(payload) {
   busy.value = true;
   try {
-    settings.value = await api("/api/settings", {
+    const data = await api("/api/settings", {
       method: "PUT",
       body: JSON.stringify(payload),
     });
+    const { mailboxPasswordSynced, ...publicSettings } = data;
+    settings.value = publicSettings;
     activeConnectionId.value = settings.value.activeConnectionId;
-    notify("Settings saved");
+    notify(
+      mailboxPasswordSynced
+        ? "Settings saved. Matching mailbox password updated on Poste.io."
+        : "Settings saved"
+    );
     await loadZones();
   } catch (err) {
     notify(err.message, "error");

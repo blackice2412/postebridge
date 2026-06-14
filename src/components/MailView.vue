@@ -223,9 +223,15 @@ async function submitResetPassword() {
     );
     if (data.generatedPassword) {
       resetResult.value = data.generatedPassword;
-      emit("notify", `Password reset for ${address}`);
+      const credNote = data.adminCredentialsUpdated
+        ? " Poste.io login credentials updated."
+        : "";
+      emit("notify", `Password reset for ${address}.${credNote}`);
     } else {
-      emit("notify", `Password updated for ${address}`);
+      const credNote = data.adminCredentialsUpdated
+        ? " Poste.io login credentials updated."
+        : "";
+      emit("notify", `Password updated for ${address}.${credNote}`);
       closeResetModal();
     }
   } catch (err) {

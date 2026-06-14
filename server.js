@@ -36,6 +36,7 @@ import {
   createPosteMailbox,
   deletePosteMailbox,
   resetPosteMailboxPassword,
+  syncAdminMailboxPassword,
   verifyPosteConnection,
   resolveMailHost,
   ensurePosteDkim,
@@ -161,6 +162,7 @@ app.get("/api/settings", (_req, res) => {
 
 app.put("/api/settings", async (req, res) => {
   try {
+    let mailboxPasswordSynced = false;
     if (req.body.poste) {
       const current = getSettings();
       const mergedPoste = { ...current.poste };
@@ -170,6 +172,12 @@ app.put("/api/settings", async (req, res) => {
         }
       }
       mergedPoste.baseUrl = mergedPoste.baseUrl.replace(/\/$/, "");
+
+      if (req.body.poste.adminPassword !== undefined && mergedPoste.adminPassword) {
+        const sync = await syncAdminMailboxPassword(current.poste, mergedPoste);
+        mailboxPasswordSynced = sync.synced;
+      }
+
       if (
         mergedPoste.baseUrl &&
         mergedPoste.adminEmail &&
@@ -178,7 +186,8 @@ app.put("/api/settings", async (req, res) => {
         await verifyPosteConnection(mergedPoste);
       }
     }
-    res.json(await updateSettings(req.body));
+    const settings = await updateSettings(req.body);
+    res.json({ ...settings, mailboxPasswordSynced });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
@@ -1241,8 +1250,24 @@ app.patch("/api/poste/mailboxes/:address/password", requirePoste, async (req, re
       return res.status(400).json({ error: "password is required (or set generate: true)" });
     }
 
-    await resetPosteMailboxPassword(req.params.address, newPassword);
-    res.json({ ok: true, generatedPassword: password ? undefined : newPassword });
+    const address = decodeURIComponent(req.params.address);
+    await resetPosteMailboxPassword(address, newPassword);
+
+    let adminCredentialsUpdated = false;
+    const posteSettings = getSettings().poste;
+    if (
+      posteSettings.adminEmail &&
+      posteSettings.adminEmail.trim().toLowerCase() === address.trim().toLowerCase()
+    ) {
+      await updateSettings({ poste: { adminPassword: newPassword } });
+      adminCredentialsUpdated = true;
+    }
+
+    res.json({
+      ok: true,
+      generatedPassword: password ? undefined : newPassword,
+      adminCredentialsUpdated,
+    });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

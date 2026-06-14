@@ -280,6 +280,9 @@ function saveProfile() {
               autocomplete="new-password"
               :placeholder="settings.poste.configured ? 'Enter a new password to replace it' : 'Poste.io admin password'"
             />
+            <small class="field-note">
+              If the admin email is also a mailbox, its Poste.io password is updated to match.
+            </small>
           </label>
         </div>
         <div v-if="settings.poste.configured" class="poste-status">
