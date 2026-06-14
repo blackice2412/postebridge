@@ -20,10 +20,12 @@ import { api, withConnection } from "../api.js";
 const props = defineProps({
   provider: { type: String, required: true },
   connectionId: { type: String, required: true },
+  zones: { type: Array, required: true },
+  selectedZoneId: [String, Number],
   selectedZone: Object,
   posteConfigured: Boolean,
 });
-const emit = defineEmits(["notify", "open-settings"]);
+const emit = defineEmits(["notify", "open-settings", "select-zone"]);
 
 const loading = ref(false);
 const status = ref(null);
@@ -32,10 +34,16 @@ const dnsState = ref(null);
 const mailboxes = ref([]);
 const overview = ref(null);
 const mailboxModal = ref(false);
+const resetModal = ref(null);
+const resetResult = ref("");
 const integrationMailbox = ref(null);
 const mailboxForm = reactive({
   local: "",
   name: "",
+  generate: true,
+  password: "",
+});
+const resetForm = reactive({
   generate: true,
   password: "",
 });
@@ -179,16 +187,44 @@ async function createMailbox() {
   }
 }
 
-async function resetPassword(address) {
-  if (!window.confirm(`Generate a new password for ${address}?`)) return;
+function openResetModal(address) {
+  resetModal.value = address;
+  resetForm.generate = true;
+  resetForm.password = "";
+  resetResult.value = "";
+}
+
+function closeResetModal() {
+  resetModal.value = null;
+  resetResult.value = "";
+}
+
+async function submitResetPassword() {
+  const address = resetModal.value;
+  if (!address) return;
+  loading.value = true;
   try {
     const data = await api(
       `/api/poste/mailboxes/${encodeURIComponent(address)}/password`,
-      { method: "PATCH", body: JSON.stringify({ generate: true }) }
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          generate: resetForm.generate,
+          password: resetForm.generate ? undefined : resetForm.password,
+        }),
+      }
     );
-    emit("notify", `New password for ${address}: ${data.generatedPassword}`);
+    if (data.generatedPassword) {
+      resetResult.value = data.generatedPassword;
+      emit("notify", `Password reset for ${address}`);
+    } else {
+      emit("notify", `Password updated for ${address}`);
+      closeResetModal();
+    }
   } catch (err) {
     emit("notify", err.message, "error");
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -247,9 +283,19 @@ function copyAllSettings() {
 
     <template v-else>
       <section class="mail-header">
-        <div>
-          <span class="section-label">Active DNS zone</span>
-          <h2>{{ selectedZone?.name || "Select a zone" }}</h2>
+        <div class="mail-header-main">
+          <label class="zone-picker">
+            <span>Active DNS zone</span>
+            <select
+              :value="selectedZoneId || ''"
+              @change="$emit('select-zone', $event.target.value)"
+            >
+              <option value="">Select a zone</option>
+              <option v-for="zone in zones" :key="zone.id" :value="zone.id">
+                {{ zone.name }}
+              </option>
+            </select>
+          </label>
           <p v-if="selectedZone">
             {{ domainState?.registered ? "Registered in Poste.io" : "Not registered in Poste.io" }}
             · {{ dnsComplete ? "DNS complete" : `${pendingCount} DNS changes pending` }}
@@ -341,7 +387,7 @@ function copyAllSettings() {
               >
                 <Cable :size="15" /> Setup
               </button>
-              <button class="icon-button" title="Reset password" @click="resetPassword(mailbox.address)">
+              <button class="icon-button" title="Reset password" @click="openResetModal(mailbox.address)">
                 <KeyRound :size="16" />
               </button>
               <button class="icon-button danger" title="Delete mailbox" @click="deleteMailbox(mailbox.address)">
@@ -395,6 +441,42 @@ function copyAllSettings() {
         <div class="modal-actions">
           <button class="button ghost" type="button" @click="mailboxModal = false">Cancel</button>
           <button class="button primary" :disabled="loading">Create mailbox</button>
+        </div>
+      </form>
+    </BaseModal>
+
+    <BaseModal
+      v-if="resetModal"
+      :title="resetResult ? 'Password reset' : 'Reset mailbox password'"
+      @close="closeResetModal"
+    >
+      <div v-if="resetResult" class="reset-result">
+        <p>New password for <strong>{{ resetModal }}</strong></p>
+        <div class="integration-value">
+          <span>Password</span>
+          <code>{{ resetResult }}</code>
+          <button class="icon-button" title="Copy password" @click="copyValue(resetResult, 'Password')">
+            <Copy :size="15" />
+          </button>
+        </div>
+        <p class="hint">Save this password now — it won't be shown again.</p>
+        <div class="modal-actions">
+          <button class="button primary" type="button" @click="closeResetModal">Done</button>
+        </div>
+      </div>
+      <form v-else class="modal-form" @submit.prevent="submitResetPassword">
+        <p class="modal-copy">Choose how to set a new password for <strong>{{ resetModal }}</strong>.</p>
+        <label class="check-control">
+          <input v-model="resetForm.generate" type="checkbox" />
+          Generate a secure password
+        </label>
+        <label v-if="!resetForm.generate" class="field">
+          <span>New password</span>
+          <input v-model="resetForm.password" type="password" minlength="8" required />
+        </label>
+        <div class="modal-actions">
+          <button class="button ghost" type="button" @click="closeResetModal">Cancel</button>
+          <button class="button primary" :disabled="loading">Reset password</button>
         </div>
       </form>
     </BaseModal>

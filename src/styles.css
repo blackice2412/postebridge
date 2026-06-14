@@ -1304,6 +1304,25 @@ tbody tr:hover td {
   padding: 18px 20px;
 }
 
+.mail-header-main p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.modal-copy {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.reset-result .hint {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .mail-header h2 {
   margin: 4px 0 0;
   font-size: 20px;

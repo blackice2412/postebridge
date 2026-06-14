@@ -389,10 +389,13 @@ onMounted(bootstrap);
           v-else-if="view === 'mail'"
           :provider="provider"
           :connection-id="activeConnectionId"
+          :zones="zones"
+          :selected-zone-id="selectedZoneId"
           :selected-zone="selectedZone"
           :poste-configured="settings.poste.configured"
           @notify="notify"
           @open-settings="navigate('settings')"
+          @select-zone="selectZone"
         />
         <PropagationView
           v-else-if="view === 'propagation'"
