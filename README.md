@@ -146,6 +146,14 @@ The CLI fallback remains available:
 npm run change-password
 ```
 
+Generate a new random root password without prompts:
+
+```bash
+npm run generate-root-password
+```
+
+Use this when you need to rotate credentials from the shell (for example inside the container with `DATA_DIR=/app/data npm run generate-root-password`).
+
 ## Data security
 
 Provider credentials are encrypted with AES-256-GCM before being written to `/app/data/settings.enc`. The encryption key is derived from the persistent, randomly generated dashboard session secret. Files are created with owner-only permissions and the container runs as a non-root user.

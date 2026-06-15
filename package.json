@@ -9,7 +9,8 @@
     "dev:server": "node --watch server.js",
     "build": "vite build",
     "preview": "vite preview",
-    "change-password": "node scripts/change-password.js"
+    "change-password": "node scripts/change-password.js",
+    "generate-root-password": "node scripts/generate-root-password.js"
   },
   "dependencies": {
     "@lucide/vue": "^1.18.0",
